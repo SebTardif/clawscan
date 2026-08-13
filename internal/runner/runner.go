@@ -1001,7 +1001,7 @@ func renderTargetFiles(target string) (string, error) {
 				return nil
 			}
 			if entry.IsDir() {
-				if shouldSkipTargetPath(target, path) {
+				if shouldSkipTargetDirectory(target, path) {
 					precomputedOmissions = append(precomputedOmissions, targetFileOmission{path: path, reason: "skipped path"})
 					return filepath.SkipDir
 				}
@@ -1040,10 +1040,6 @@ func renderTargetFiles(target string) (string, error) {
 		suppressedOmissions++
 	}
 	for _, path := range paths {
-		if shouldSkipTargetPath(target, path) {
-			addOmission(path, "skipped path")
-			continue
-		}
 		info, err := os.Stat(path)
 		if err != nil {
 			return "", err
@@ -1126,14 +1122,14 @@ func markdownPathLabel(label string) string {
 	return quoted[1 : len(quoted)-1]
 }
 
-func shouldSkipTargetPath(root string, path string) bool {
+func shouldSkipTargetDirectory(root string, path string) bool {
 	rel, err := filepath.Rel(root, path)
 	if err != nil {
 		return true
 	}
 	for _, part := range strings.Split(rel, string(filepath.Separator)) {
 		switch part {
-		case ".git", "node_modules", "vendor", ".venv", "__pycache__":
+		case ".git", "node_modules", "vendor", ".venv":
 			return true
 		}
 	}

@@ -3078,6 +3078,92 @@ func TestStaticScannerFindsDestructiveRmWithForceBeforeRecursive(t *testing.T) {
 	t.Fatalf("missing destructive shell finding: %#v", report.Findings)
 }
 
+func TestStaticScannerScansGitFileAndFindsProcessExecution(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "skill")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "SKILL.md"), []byte("# Demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	payload := "import os\nos.system(\"whoami > pwn\")\n"
+	if err := os.WriteFile(filepath.Join(target, ".git"), []byte(payload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := ParseArgs([]string{target, "--scanner", "clawscan-static"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := Run(opts, RunContext{Env: map[string]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := decodeStaticReport(t, artifact.Scanners["clawscan-static"].Raw)
+	for _, finding := range report.Findings {
+		if finding.ID == "static.python_process_execution" && finding.Path == ".git" {
+			prompt, err := RenderPromptTemplate("{{ target.files }}", artifact)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(prompt, "### .git\n```text\n"+strings.TrimSpace(payload)) {
+				t.Fatalf("judge prompt omitted .git file contents: %s", prompt)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing .git process-execution finding: %#v", report.Findings)
+}
+
+func TestPythonBytecodeEvidenceReachesJudgePrompt(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "skill")
+	cacheDir := filepath.Join(target, "scripts", "rendering", "__pycache__")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "SKILL.md"), []byte("# Demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bytecodePath := filepath.Join(cacheDir, "output.cpython-312.pyc")
+	if err := os.WriteFile(bytecodePath, []byte{0xcb, 0x0d, 0x0d, 0x0a, 0x00, 0x00, 0x00, 0x00}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := ParseArgs([]string{target, "--scanner", "clawscan-static"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := Run(opts, RunContext{Env: map[string]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := decodeStaticReport(t, artifact.Scanners["clawscan-static"].Raw)
+	wantPath := "scripts/rendering/__pycache__/output.cpython-312.pyc"
+	found := false
+	for _, finding := range report.Findings {
+		if finding.ID == "static.python_bytecode" && finding.Path == wantPath {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("missing Python bytecode finding: %#v", report.Findings)
+	}
+	prompt, err := RenderPromptTemplate("Evidence:\n{{ scanners.clawscan-static }}\nFiles:\n{{ target.files }}", artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, `"id": "static.python_bytecode"`) {
+		t.Fatalf("judge prompt omitted static bytecode evidence: %s", prompt)
+	}
+	if !strings.Contains(prompt, wantPath+"\n[omitted: binary file]") {
+		t.Fatalf("judge prompt omitted bytecode path marker: %s", prompt)
+	}
+	if strings.Contains(prompt, "__pycache__\n[omitted: skipped path]") {
+		t.Fatalf("judge prompt still skipped __pycache__: %s", prompt)
+	}
+}
+
 func TestStaticScannerRecordsOmittedBinaryAndOversizedFiles(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "skill")
