@@ -98,6 +98,19 @@ var staticRules = []staticRule{
 		description: "Looks for destructive recursive removal of the filesystem root.",
 		pattern:     regexp.MustCompile(`(?i)\brm\s+(?:-[a-z]*(?:r[a-z]*f|f[a-z]*r)[a-z]*|-[a-z]*r[a-z]*\s+-[a-z]*f[a-z]*|-[a-z]*f[a-z]*\s+-[a-z]*r[a-z]*)\s+/(?:\s|$)`),
 	},
+	{
+		id:          "static.python_process_execution",
+		title:       "Python process execution",
+		severity:    "high",
+		description: "Looks for Python APIs that execute shell commands or child processes.",
+		pattern:     regexp.MustCompile(`(?i)\b(?:os\s*\.\s*system|subprocess\s*\.\s*(?:call|check_call|check_output|popen|run))\s*\(`),
+	},
+	{
+		id:          "static.python_bytecode",
+		title:       "Packaged Python bytecode",
+		severity:    "high",
+		description: "Flags precompiled Python bytecode that can execute without reviewable source.",
+	},
 }
 
 type staticFileCandidate struct {
@@ -182,6 +195,18 @@ func scanStaticTarget(target string) (staticScannerFiles, []staticFinding, error
 			files.addOmitted(rel, "not regular file", 0)
 			return nil
 		}
+		rel = filepath.ToSlash(rel)
+		if strings.EqualFold(filepath.Ext(rel), ".pyc") {
+			findings = append(findings, staticFinding{
+				ID:          "static.python_bytecode",
+				Title:       "Packaged Python bytecode",
+				Severity:    "high",
+				Description: "Precompiled Python bytecode is executable and opaque to source-text review.",
+				Path:        rel,
+				Line:        1,
+				Evidence:    "Precompiled Python bytecode is included in the scanned target.",
+			})
+		}
 		if info.Size() > maxTargetFileBytes {
 			files.addOmitted(rel, "file exceeds size limit", info.Size())
 			return nil
@@ -200,7 +225,6 @@ func scanStaticTarget(target string) (staticScannerFiles, []staticFinding, error
 			return nil
 		}
 		totalBytes += info.Size()
-		rel = filepath.ToSlash(rel)
 		files.addScanned(rel, info.Size(), sha256BytesHex(content))
 		findings = append(findings, scanStaticContent(rel, string(content))...)
 		return nil
@@ -216,16 +240,12 @@ func scanStaticTarget(target string) (staticScannerFiles, []staticFinding, error
 		if err != nil {
 			return files.recordWalkError(target, path, entry)
 		}
-		if shouldSkipTargetPath(target, path) {
-			rel := relativeManifestPath(target, path)
-			if entry.IsDir() {
+		if entry.IsDir() {
+			if shouldSkipTargetDirectory(target, path) {
+				rel := relativeManifestPath(target, path)
 				files.addOmitted(rel, "skipped path", 0)
 				return filepath.SkipDir
 			}
-			files.addOmitted(rel, "skipped path", 0)
-			return nil
-		}
-		if entry.IsDir() {
 			return nil
 		}
 		info, err := entry.Info()
@@ -310,6 +330,9 @@ func scanStaticContent(path string, content string) []staticFinding {
 	lines := strings.Split(content, "\n")
 	for lineIndex, line := range lines {
 		for _, rule := range staticRules {
+			if rule.pattern == nil {
+				continue
+			}
 			if !rule.pattern.MatchString(line) {
 				continue
 			}
