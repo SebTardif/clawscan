@@ -111,6 +111,18 @@ var staticRules = []staticRule{
 		severity:    "high",
 		description: "Flags precompiled Python bytecode that can execute without reviewable source.",
 	},
+	{
+		id:          "static.nul_byte_in_text",
+		title:       "NUL bytes in inspectable content",
+		severity:    "high",
+		description: "Flags NUL bytes that can disguise executable or policy-relevant content as an opaque binary.",
+	},
+	{
+		id:          "static.opaque_binary",
+		title:       "Opaque binary content",
+		severity:    "low",
+		description: "Surfaces opaque binary content that cannot be inspected by text rules.",
+	},
 }
 
 type staticFileCandidate struct {
@@ -220,13 +232,41 @@ func scanStaticTarget(target string) (staticScannerFiles, []staticFinding, error
 			files.addOmitted(rel, "read failed", info.Size())
 			return nil
 		}
+		contentFindings := scanStaticContent(rel, string(content))
 		if bytes.IndexByte(content, 0) >= 0 {
-			files.addOmitted(rel, "binary file", info.Size())
-			return nil
+			inspection, _ := inspectNULContent(rel, content)
+			contentFindings = scanStaticInspection(rel, inspection)
+			if !inspection.reviewable && len(contentFindings) == 0 {
+				files.addOmitted(rel, "binary file", info.Size())
+				if !strings.EqualFold(filepath.Ext(rel), ".pyc") {
+					findings = append(findings, staticFinding{
+						ID:          "static.opaque_binary",
+						Title:       "Opaque binary content",
+						Severity:    "low",
+						Description: "Opaque binary content cannot be inspected by text rules and requires policy review.",
+						Path:        rel,
+						Line:        1,
+						Evidence:    "Binary file was omitted from text inspection.",
+					})
+				}
+				return nil
+			}
+			if inspection.obfuscated {
+				nulOffset := bytes.IndexByte(content, 0)
+				findings = append(findings, staticFinding{
+					ID:          "static.nul_byte_in_text",
+					Title:       "NUL bytes in inspectable content",
+					Severity:    "high",
+					Description: "NUL bytes can disguise policy-relevant content as an opaque binary; ClawScan removed them before applying static rules.",
+					Path:        rel,
+					Line:        bytes.Count(content[:nulOffset], []byte{'\n'}) + 1,
+					Evidence:    fmt.Sprintf("Inspectable file contains %d NUL byte(s).", bytes.Count(content, []byte{0})),
+				})
+			}
 		}
 		totalBytes += info.Size()
 		files.addScanned(rel, info.Size(), sha256BytesHex(content))
-		findings = append(findings, scanStaticContent(rel, string(content))...)
+		findings = append(findings, contentFindings...)
 		return nil
 	}
 	if !info.IsDir() {
@@ -346,6 +386,26 @@ func scanStaticContent(path string, content string) []staticFinding {
 				Evidence:    evidenceSnippet(line),
 			})
 		}
+	}
+	return findings
+}
+
+func scanStaticInspection(path string, inspection nulContentInspection) []staticFinding {
+	findings := scanStaticContent(path, string(inspection.content))
+	if len(inspection.alternate) == 0 {
+		return findings
+	}
+	seen := make(map[string]bool, len(findings))
+	for _, finding := range findings {
+		seen[fmt.Sprintf("%s\x00%d", finding.ID, finding.Line)] = true
+	}
+	for _, finding := range scanStaticContent(path, string(inspection.alternate)) {
+		key := fmt.Sprintf("%s\x00%d", finding.ID, finding.Line)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		findings = append(findings, finding)
 	}
 	return findings
 }

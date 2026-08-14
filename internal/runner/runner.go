@@ -1060,11 +1060,34 @@ func renderTargetFiles(target string) (string, error) {
 			}
 			return "", err
 		}
+		contentForPrompt := content
+		nulWarning := ""
 		if bytes.IndexByte(content, 0) >= 0 {
-			addOmission(path, "binary file")
+			inspection, _ := inspectNULContent(path, content)
+			if !inspection.reviewable && len(scanStaticInspection(path, inspection)) == 0 {
+				addOmission(path, "binary file")
+				continue
+			}
+			contentForPrompt = inspection.content
+			if inspection.textEncoding != "" {
+				nulWarning = fmt.Sprintf("[decoded from %s for review]\n", inspection.textEncoding)
+				if len(inspection.alternate) > 0 {
+					contentForPrompt = []byte(fmt.Sprintf("%s\n\n[raw bytes with NULs removed for alternate review]\n%s", inspection.content, inspection.alternate))
+				}
+			} else {
+				nulWarning = "[warning: NUL bytes removed from inspectable file for review]\n"
+			}
+		}
+		renderedContentBytes := len(nulWarning) + len(contentForPrompt)
+		if renderedContentBytes > maxTargetFileBytes {
+			addOmission(path, "file exceeds size limit")
 			continue
 		}
-		totalBytes += len(content)
+		if totalBytes+renderedContentBytes > maxTargetFilesBytes {
+			addOmission(path, "total file budget exceeded")
+			continue
+		}
+		totalBytes += renderedContentBytes
 		label := filepath.Base(path)
 		if targetInfo.IsDir() {
 			rel, err := filepath.Rel(target, path)
@@ -1073,7 +1096,7 @@ func renderTargetFiles(target string) (string, error) {
 			}
 			label = rel
 		}
-		text := strings.TrimRight(string(content), "\n")
+		text := nulWarning + strings.TrimRight(string(contentForPrompt), "\n")
 		fence := fenceForContent(text)
 		blocks = append(blocks, fmt.Sprintf("### %s\n%s%s\n%s\n%s", markdownPathLabel(label), fence, languageForPath(path), text, fence))
 	}
