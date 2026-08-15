@@ -754,6 +754,26 @@ func TestLoadBenchmarkIDSelectionAcceptsTextAndHTTPJSONL(t *testing.T) {
 	}
 }
 
+func TestLoadBenchmarkIDSelectionRejectsOversizedHTTPBody(t *testing.T) {
+	var body bytes.Buffer
+	for i := 0; body.Len() <= maxBenchmarkIDSourceBytes; i++ {
+		fmt.Fprintf(&body, "case_%08d\n", i)
+	}
+	if body.Len() <= maxBenchmarkIDSourceBytes {
+		t.Fatalf("test body is %d bytes, want more than %d", body.Len(), maxBenchmarkIDSourceBytes)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body.Bytes())
+	}))
+	defer server.Close()
+
+	_, err := LoadBenchmarkIDSelection(server.URL + "/ids.txt")
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err = %v, want exceeds %d bytes", err, maxBenchmarkIDSourceBytes)
+	}
+}
+
 func TestLoadBenchmarkIDSelectionRejectsBadSources(t *testing.T) {
 	tests := []struct {
 		name    string

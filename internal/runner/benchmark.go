@@ -39,6 +39,11 @@ const (
 	huggingFaceRowsEndpoint       = "https://datasets-server.huggingface.co/rows"
 	huggingFaceRowsPageSize       = 100
 	huggingFaceRowsMaxAttempts    = 6
+
+	// maxBenchmarkIDSourceBytes caps HTTP --ids bodies. Unbounded ReadAll
+	// would let a remote source allocate arbitrarily. Matches sibling
+	// 256 KiB caps (installpolicy maxRequestBytes, plugin manifest).
+	maxBenchmarkIDSourceBytes = 256 * 1024
 )
 
 var huggingFaceRowsRetryDelay = 2 * time.Second
@@ -338,7 +343,14 @@ func readBenchmarkIDSource(source string) ([]byte, error) {
 		if resp.StatusCode < 200 || resp.StatusCode > 299 {
 			return nil, fmt.Errorf("read --ids source %s: HTTP %d", source, resp.StatusCode)
 		}
-		return io.ReadAll(resp.Body)
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxBenchmarkIDSourceBytes+1))
+		if err != nil {
+			return nil, fmt.Errorf("read --ids source %s: %w", source, err)
+		}
+		if len(data) > maxBenchmarkIDSourceBytes {
+			return nil, fmt.Errorf("read --ids source %s: body exceeds %d bytes", source, maxBenchmarkIDSourceBytes)
+		}
+		return data, nil
 	}
 	data, err := os.ReadFile(source)
 	if err != nil {
