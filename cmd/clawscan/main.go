@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -74,7 +76,9 @@ func run(args []string, environ []string) error {
 		opts.OutputPath = defaultOutputPath
 	}
 	if opts.Benchmark != nil {
-		artifact, err := runner.RunBenchmark(opts, runner.RunContext{Env: runner.EnvMap(environ)})
+		runCtx, stop := newBenchmarkRunContext(environ)
+		defer stop()
+		artifact, err := runner.RunBenchmark(opts, runCtx)
 		if err != nil {
 			return err
 		}
@@ -283,6 +287,11 @@ func hasInstallPolicyConfigOverride(args []string) bool {
 	return false
 }
 
+func newBenchmarkRunContext(environ []string) (runner.RunContext, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	return runner.RunContext{Context: ctx, Env: runner.EnvMap(environ)}, stop
+}
+
 func runBenchmarkCommand(args []string, environ []string) error {
 	switch {
 	case len(args) == 1 && args[0] == "list":
@@ -309,7 +318,9 @@ func runBenchmarkCommand(args []string, environ []string) error {
 	if !opts.JSON && opts.OutputPath == "" {
 		opts.OutputPath = defaultOutputPath
 	}
-	artifact, err := runner.RunBenchmark(opts, runner.RunContext{Env: runner.EnvMap(environ)})
+	runCtx, stop := newBenchmarkRunContext(environ)
+	defer stop()
+	artifact, err := runner.RunBenchmark(opts, runCtx)
 	if err != nil {
 		return err
 	}

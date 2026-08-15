@@ -103,6 +103,7 @@ type EnvRequirement struct {
 }
 
 type RunContext struct {
+	Context              context.Context
 	Env                  map[string]string
 	Now                  func() time.Time
 	CommandRunner        CommandRunner

@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -180,6 +181,7 @@ type HuggingFaceBenchmarkClient struct {
 	SkillTrustBenchArchiveURL  string
 	SkillTrustBenchArchivePath string
 	SkillTrustBenchRowsURL     string
+	Context                    context.Context
 }
 
 type huggingFaceRowsResponse struct {
@@ -249,7 +251,7 @@ func RunBenchmark(opts Options, ctx RunContext) (BenchmarkArtifact, error) {
 	startedAt := now().UTC().Format(time.RFC3339Nano)
 	client := ctx.BenchmarkClient
 	if client == nil {
-		client = HuggingFaceBenchmarkClient{}
+		client = HuggingFaceBenchmarkClient{Context: ctx.Context}
 	}
 	artifact := BenchmarkArtifact{
 		SchemaVersion: "clawscan-benchmark-v1",
@@ -756,7 +758,7 @@ func (client HuggingFaceBenchmarkClient) FetchOpenClawRows(dataset string, split
 				length = remaining
 			}
 		}
-		page, err := client.fetchOpenClawRowsPage(httpClient, endpoint, dataset, split, nextOffset, length)
+		page, err := client.fetchOpenClawRowsPage(client.requestContext(), httpClient, endpoint, dataset, split, nextOffset, length)
 		if err != nil {
 			return nil, err
 		}
@@ -793,7 +795,7 @@ func (client HuggingFaceBenchmarkClient) FetchSkillTrustBenchRows(dataset string
 	if rowsURL == "" {
 		rowsURL = skillTrustBenchRowsURL
 	}
-	raw, statusCode, err := fetchHuggingFaceRowsPage(httpClient, rowsURL)
+	raw, statusCode, err := fetchHuggingFaceRowsPage(client.requestContext(), httpClient, rowsURL)
 	if err != nil {
 		return nil, err
 	}
@@ -831,7 +833,14 @@ func (client HuggingFaceBenchmarkClient) FetchSkillTrustBenchRows(dataset string
 	return rows[offset:end], nil
 }
 
-func (client HuggingFaceBenchmarkClient) fetchOpenClawRowsPage(httpClient *http.Client, endpoint string, dataset string, split string, offset int, length int) ([]OpenClawBenchmarkRow, error) {
+func (client HuggingFaceBenchmarkClient) requestContext() context.Context {
+	if client.Context != nil {
+		return client.Context
+	}
+	return context.Background()
+}
+
+func (client HuggingFaceBenchmarkClient) fetchOpenClawRowsPage(ctx context.Context, httpClient *http.Client, endpoint string, dataset string, split string, offset int, length int) ([]OpenClawBenchmarkRow, error) {
 	values := url.Values{}
 	values.Set("dataset", dataset)
 	values.Set("config", openClawBenchmarkConfig)
@@ -839,7 +848,7 @@ func (client HuggingFaceBenchmarkClient) fetchOpenClawRowsPage(httpClient *http.
 	values.Set("offset", fmt.Sprintf("%d", offset))
 	values.Set("length", fmt.Sprintf("%d", length))
 	requestURL := endpoint + "?" + values.Encode()
-	raw, statusCode, err := fetchHuggingFaceRowsPage(httpClient, requestURL)
+	raw, statusCode, err := fetchHuggingFaceRowsPage(ctx, httpClient, requestURL)
 	if err != nil {
 		return nil, err
 	}
@@ -861,10 +870,16 @@ func (client HuggingFaceBenchmarkClient) fetchOpenClawRowsPage(httpClient *http.
 	return rows, nil
 }
 
-func fetchHuggingFaceRowsPage(httpClient *http.Client, requestURL string) ([]byte, int, error) {
+func fetchHuggingFaceRowsPage(ctx context.Context, httpClient *http.Client, requestURL string) ([]byte, int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var lastErr error
 	for attempt := 1; attempt <= huggingFaceRowsMaxAttempts; attempt++ {
-		raw, statusCode, headers, err := fetchHuggingFaceRowsPageOnce(httpClient, requestURL)
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		raw, statusCode, headers, err := fetchHuggingFaceRowsPageOnce(ctx, httpClient, requestURL)
 		if err == nil && !isRetriableHuggingFaceRowsStatus(statusCode) {
 			return raw, statusCode, nil
 		}
@@ -879,13 +894,21 @@ func fetchHuggingFaceRowsPage(httpClient *http.Client, requestURL string) ([]byt
 		if attempt == huggingFaceRowsMaxAttempts {
 			break
 		}
-		time.Sleep(huggingFaceRowsBackoff(attempt, headers))
+		select {
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		case <-time.After(huggingFaceRowsBackoff(attempt, headers)):
+		}
 	}
 	return nil, 0, lastErr
 }
 
-func fetchHuggingFaceRowsPageOnce(httpClient *http.Client, requestURL string) ([]byte, int, http.Header, error) {
-	response, err := httpClient.Get(requestURL)
+func fetchHuggingFaceRowsPageOnce(ctx context.Context, httpClient *http.Client, requestURL string) ([]byte, int, http.Header, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	response, err := httpClient.Do(request)
 	if err != nil {
 		return nil, 0, nil, err
 	}
