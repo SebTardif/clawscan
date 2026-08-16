@@ -1,13 +1,11 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -76,9 +74,7 @@ func run(args []string, environ []string) error {
 		opts.OutputPath = defaultOutputPath
 	}
 	if opts.Benchmark != nil {
-		runCtx, stop := newBenchmarkRunContext(environ)
-		defer stop()
-		artifact, err := runner.RunBenchmark(opts, runCtx)
+		artifact, err := runner.RunBenchmark(opts, benchmarkRunContext(environ))
 		if err != nil {
 			return err
 		}
@@ -287,9 +283,10 @@ func hasInstallPolicyConfigOverride(args []string) bool {
 	return false
 }
 
-func newBenchmarkRunContext(environ []string) (runner.RunContext, context.CancelFunc) {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	return runner.RunContext{Context: ctx, Env: runner.EnvMap(environ)}, stop
+func benchmarkRunContext(environ []string) runner.RunContext {
+	// Keep SIGINT at the process default until every benchmark phase observes Context.
+	// A signal-derived context would otherwise swallow interrupts during scanner runs and downloads.
+	return runner.RunContext{Env: runner.EnvMap(environ)}
 }
 
 func runBenchmarkCommand(args []string, environ []string) error {
@@ -318,9 +315,7 @@ func runBenchmarkCommand(args []string, environ []string) error {
 	if !opts.JSON && opts.OutputPath == "" {
 		opts.OutputPath = defaultOutputPath
 	}
-	runCtx, stop := newBenchmarkRunContext(environ)
-	defer stop()
-	artifact, err := runner.RunBenchmark(opts, runCtx)
+	artifact, err := runner.RunBenchmark(opts, benchmarkRunContext(environ))
 	if err != nil {
 		return err
 	}
