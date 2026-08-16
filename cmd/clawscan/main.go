@@ -74,7 +74,7 @@ func run(args []string, environ []string) error {
 		opts.OutputPath = defaultOutputPath
 	}
 	if opts.Benchmark != nil {
-		artifact, err := runner.RunBenchmark(opts, runner.RunContext{Env: runner.EnvMap(environ)})
+		artifact, err := runner.RunBenchmark(opts, benchmarkRunContext(environ))
 		if err != nil {
 			return err
 		}
@@ -283,6 +283,12 @@ func hasInstallPolicyConfigOverride(args []string) bool {
 	return false
 }
 
+func benchmarkRunContext(environ []string) runner.RunContext {
+	// Keep SIGINT at the process default until every benchmark phase observes Context.
+	// A signal-derived context would otherwise swallow interrupts during scanner runs and downloads.
+	return runner.RunContext{Env: runner.EnvMap(environ)}
+}
+
 func runBenchmarkCommand(args []string, environ []string) error {
 	switch {
 	case len(args) == 1 && args[0] == "list":
@@ -309,7 +315,7 @@ func runBenchmarkCommand(args []string, environ []string) error {
 	if !opts.JSON && opts.OutputPath == "" {
 		opts.OutputPath = defaultOutputPath
 	}
-	artifact, err := runner.RunBenchmark(opts, runner.RunContext{Env: runner.EnvMap(environ)})
+	artifact, err := runner.RunBenchmark(opts, benchmarkRunContext(environ))
 	if err != nil {
 		return err
 	}

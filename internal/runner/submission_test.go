@@ -1,7 +1,9 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -219,6 +221,52 @@ func TestHuggingFaceBenchmarkClientRetriesRateLimitHTTPError(t *testing.T) {
 	}
 	if requests != 3 {
 		t.Fatalf("requests = %d, want 3", requests)
+	}
+}
+
+func TestHuggingFaceBenchmarkClientHonorsCancelDuringRetryBackoff(t *testing.T) {
+	withHuggingFaceRowsRetryDelay(t, 30*time.Second)
+
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"slow down"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	client := HuggingFaceBenchmarkClient{
+		Endpoint: server.URL,
+		Context:  ctx,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.FetchOpenClawRows("OpenClaw/clawhub-security-signals", "eval_holdout", 0, 1)
+		done <- err
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first HuggingFace request did not start")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("FetchOpenClawRows did not return after context cancel")
 	}
 }
 
