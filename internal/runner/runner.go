@@ -1570,10 +1570,10 @@ func RenderClawHubPrompt(systemPromptSource string, artifact Artifact) (string, 
 		return "", err
 	}
 	var supplemental []clawhubprompt.ScannerEvidence
-	if artifact.Profile == clawHubAIGProfileID {
+	if aigAnalysis := clawHubAIGAnalysis(artifact); aigAnalysis != nil {
 		supplemental = append(supplemental, clawhubprompt.ScannerEvidence{
 			Label: "A.I.G SARIF evidence supplied to Codex",
-			Value: clawHubAIGAnalysis(artifact),
+			Value: aigAnalysis,
 		})
 	}
 	return clawhubprompt.Build(
@@ -2199,9 +2199,43 @@ func defaultSkillSpectorOpenAIProvider(env map[string]string) {
 	env["SKILLSPECTOR_PROVIDER"] = "openai"
 }
 
+const (
+	defaultAIGOpenAIModel   = "gpt-5.5"
+	defaultAIGOpenAIBaseURL = "https://api.openai.com/v1"
+)
+
+// defaultAIGRuntimeEnv keeps credentials on their intended provider. AIG's
+// upstream default is OpenRouter, so an OpenAI or Codex credential must also
+// select OpenAI's endpoint and a compatible model. A dedicated LLM_API_KEY
+// retains AIG's documented provider defaults.
+func defaultAIGRuntimeEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	if strings.TrimSpace(env["LLM_API_KEY"]) != "" {
+		return
+	}
+	if strings.TrimSpace(env["OPENAI_API_KEY"]) == "" {
+		codexKey := strings.TrimSpace(env["CODEX_API_KEY"])
+		if codexKey == "" {
+			return
+		}
+		env["LLM_API_KEY"] = codexKey
+	}
+	if strings.TrimSpace(env["DEFAULT_MODEL"]) == "" {
+		env["DEFAULT_MODEL"] = defaultAIGOpenAIModel
+	}
+	if strings.TrimSpace(env["DEFAULT_BASE_URL"]) == "" {
+		env["DEFAULT_BASE_URL"] = defaultAIGOpenAIBaseURL
+	}
+}
+
 func applyRuntimeEnvDefaults(opts Options, env map[string]string) {
 	if scannerRequested(opts, "skillspector") {
 		defaultSkillSpectorOpenAIProvider(env)
+	}
+	if scannerRequested(opts, "aig") {
+		defaultAIGRuntimeEnv(env)
 	}
 }
 

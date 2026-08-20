@@ -2849,6 +2849,91 @@ func TestSkillSpectorDefaultsProviderToOpenAIWhenOpenAIKeyIsPresent(t *testing.T
 	}
 }
 
+func TestAIGRuntimeDefaultsKeepCredentialsOnTheirProvider(t *testing.T) {
+	// The clawhub judge command already treats CODEX_API_KEY as an accepted
+	// OpenAI credential. AIG defaults to OpenRouter, so reuse must also bind the
+	// request to OpenAI without enabling SkillSpector's OpenAI mode.
+	env := map[string]string{"CODEX_API_KEY": "fake"}
+	defaultAIGRuntimeEnv(env)
+	if env["LLM_API_KEY"] != "fake" {
+		t.Fatalf("LLM_API_KEY not backfilled from CODEX_API_KEY: %#v", env)
+	}
+	if env["DEFAULT_MODEL"] != defaultAIGOpenAIModel || env["DEFAULT_BASE_URL"] != defaultAIGOpenAIBaseURL {
+		t.Fatalf("AIG OpenAI defaults not applied: %#v", env)
+	}
+	if skillSpectorLLMEnabled(env) {
+		t.Fatalf("AIG fallback unexpectedly enabled SkillSpector LLM mode: %#v", env)
+	}
+
+	openAI := map[string]string{"OPENAI_API_KEY": "fake"}
+	defaultAIGRuntimeEnv(openAI)
+	if openAI["DEFAULT_MODEL"] != defaultAIGOpenAIModel || openAI["DEFAULT_BASE_URL"] != defaultAIGOpenAIBaseURL {
+		t.Fatalf("OPENAI_API_KEY did not select OpenAI defaults: %#v", openAI)
+	}
+	if _, ok := openAI["LLM_API_KEY"]; ok {
+		t.Fatalf("LLM_API_KEY backfilled despite existing OPENAI_API_KEY: %#v", openAI)
+	}
+
+	explicitOpenAI := map[string]string{
+		"OPENAI_API_KEY":   "fake",
+		"DEFAULT_MODEL":    "custom-model",
+		"DEFAULT_BASE_URL": "https://example.invalid/v1",
+	}
+	defaultAIGRuntimeEnv(explicitOpenAI)
+	if explicitOpenAI["DEFAULT_MODEL"] != "custom-model" || explicitOpenAI["DEFAULT_BASE_URL"] != "https://example.invalid/v1" {
+		t.Fatalf("explicit AIG provider settings were overwritten: %#v", explicitOpenAI)
+	}
+
+	dedicated := map[string]string{"CODEX_API_KEY": "fake", "OPENAI_API_KEY": "fake", "LLM_API_KEY": "fake"}
+	defaultAIGRuntimeEnv(dedicated)
+	if _, ok := dedicated["DEFAULT_MODEL"]; ok {
+		t.Fatalf("dedicated LLM_API_KEY received an OpenAI model default: %#v", dedicated)
+	}
+	if _, ok := dedicated["DEFAULT_BASE_URL"]; ok {
+		t.Fatalf("dedicated LLM_API_KEY received an OpenAI base URL default: %#v", dedicated)
+	}
+
+	withoutKey := map[string]string{}
+	defaultAIGRuntimeEnv(withoutKey)
+	if len(withoutKey) != 0 {
+		t.Fatalf("AIG defaults applied without a credential source: %#v", withoutKey)
+	}
+}
+
+func TestApplyRuntimeEnvDefaultsBackfillsAIGKeyOnlyWhenAIGRequested(t *testing.T) {
+	requested, err := ParseArgs([]string{"./skill", "--scanner", "aig"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"CODEX_API_KEY": "fake"}
+	applyRuntimeEnvDefaults(requested, env)
+	if err := ValidateRequirements(requested, env); err != nil {
+		t.Fatalf("unexpected requirement error after backfill: %v", err)
+	}
+	if env["LLM_API_KEY"] != "fake" {
+		t.Fatalf("AIG key not backfilled into LLM_API_KEY: %#v", env)
+	}
+	if env["DEFAULT_MODEL"] != defaultAIGOpenAIModel || env["DEFAULT_BASE_URL"] != defaultAIGOpenAIBaseURL {
+		t.Fatalf("AIG OpenAI defaults not applied: %#v", env)
+	}
+	if skillSpectorLLMEnabled(env) {
+		t.Fatalf("AIG fallback unexpectedly enabled SkillSpector LLM mode: %#v", env)
+	}
+
+	notRequested, err := ParseArgs([]string{"./skill", "--scanner", "clawscan-static"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unaffected := map[string]string{"CODEX_API_KEY": "fake"}
+	applyRuntimeEnvDefaults(notRequested, unaffected)
+	if _, ok := unaffected["LLM_API_KEY"]; ok {
+		t.Fatalf("LLM_API_KEY backfilled without aig in the scanner list: %#v", unaffected)
+	}
+	if _, ok := unaffected["DEFAULT_BASE_URL"]; ok {
+		t.Fatalf("AIG provider defaults applied without aig in the scanner list: %#v", unaffected)
+	}
+}
+
 func TestRunExecutesAgentVerusScanner(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "skill")
@@ -4557,6 +4642,35 @@ func TestRenderClawHubAIGPromptIncludesAIGEvidence(t *testing.T) {
 		"A.I.G SARIF evidence supplied to Codex:",
 		`"ruleId": "T04"`,
 		"- pre-scan malicious signal present: yes",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestRenderClawHubPromptIncludesAIGEvidenceForProductionProfile(t *testing.T) {
+	// The production "clawhub" profile (not just the retired "clawhub-aig"
+	// candidate) now runs aig alongside skillspector and clawscan-static, so
+	// its SARIF evidence must reach the Codex judge whenever it produced a
+	// result, regardless of which profile label requested the run. The
+	// pre-scan malicious-signal heuristic is unchanged by this and still
+	// keys off clawscan-static for the "clawhub" profile label.
+	prompt, err := RenderClawHubPrompt("SYSTEM", Artifact{
+		Profile: "clawhub",
+		Scanners: map[string]ScannerResult{
+			"skillspector":    {Raw: json.RawMessage(`{"status":"clean"}`)},
+			"clawscan-static": {Raw: json.RawMessage(`{"schemaVersion":"clawscan-static-v1","findings":[]}`)},
+			"aig":             {Raw: json.RawMessage(`{"version":"2.1.0","runs":[{"results":[{"ruleId":"T04","level":"error"}]}]}`)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"SkillSpector findings supplied to Codex:",
+		"A.I.G SARIF evidence supplied to Codex:",
+		`"ruleId": "T04"`,
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
